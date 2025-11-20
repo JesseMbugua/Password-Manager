@@ -1,0 +1,16 @@
+{
+  "name": "password-manager",
+  "version": "1.0.0",
+  "description": "Secure password manager with cryptography",
+  "main": "password-manager.js",
+  "scripts": {
+    "test": "mocha test.js --timeout 10000"
+  },
+  "keywords": ["cryptography", "password-manager", "security"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "mocha": "^10.2.0",
+    "chai": "^4.3.10"
+  }
+}
