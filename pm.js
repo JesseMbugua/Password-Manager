@@ -1,149 +1,612 @@
+#!/usr/bin/env node
 "use strict";
 
+/**
+ * CLI for Password Manager
+ *
+ * Requirements:
+ *   npm install prompt-sync
+ *   npm install clipboardy
+ *
+ * Usage:
+ *   node pm.js
+ *   pm> help to get commands list
+ */
+
 const fs = require("fs");
+const path = require("path");
 const readline = require("readline");
-const { Keychain } = require("./password-manager");
+const { spawn } = require("child_process");
+const Keychain = require("./password-manager");
+const prompt = require("prompt-sync")({ sigint: true });
 
+const { webcrypto } = require("crypto");
 
-function prompt(question, hide = false) {
-  return new Promise((resolve) => {
-    const rl = readline.createInterface({
-      input: process.stdin,
-      output: hide ? undefined : process.stdout,
-      terminal: true,
-    });
+// clipboard 
+let clipboardModule = null;
+async function copyToClipboard(text) {
+  try {
+    if (!clipboardModule) clipboardModule = await import("clipboardy");
 
-    if (hide) {
-      process.stdout.write(question);
-      process.stdin.on("data", (char) => {
-        char = char + "";
-        if (char.match(/\n|\r|\u0004/)) {
-          process.stdout.write("\n");
-        } else {
-          process.stdout.write("*"); // mask password input
-        }
-      });
+    if (clipboardModule && clipboardModule.write) {
+      await clipboardModule.write(text);
+      return;
+    }
+    if (clipboardModule && clipboardModule.default && clipboardModule.default.write) {
+      await clipboardModule.default.write(text);
+      return;
+    }
+  } catch (e) {
+
+  }
+
+  return new Promise((resolve, reject) => {
+    const platform = process.platform;
+    let proc;
+    if (platform === "win32") {
+      proc = spawn("clip");
+    } else if (platform === "darwin") {
+      proc = spawn("pbcopy");
+    } else {
+      proc = spawn("sh", ["-c", "command -v xclip >/dev/null 2>&1 && xclip -selection clipboard || ( command -v xsel >/dev/null 2>&1 && xsel --clipboard --input )"]);
     }
 
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer);
+    if (!proc || !proc.stdin) {
+      reject(new Error("No clipboard utility available"));
+      return;
+    }
+
+    proc.stdin.write(text);
+    proc.stdin.end();
+
+    proc.on("error", (err) => reject(err));
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error("Clipboard command failed"));
     });
   });
 }
 
-
+// config
 const VAULT_FILE = "vault.json";
+const AUTOLOCK_MS = 1 * 60 * 1000; // 1 minute inactivity - auto-lock
+const WARNING_BEFORE_MS = 20 * 1000; // 20 seconds -  warning
 
+let kc = null;
+let autolockTimer = null;
+let warningTimer = null;
+let warned = false;
+let dataListenerAdded = false;
 
-async function initVault() {
-  const password = await prompt("Set master password: ", true);
-  const kc = await Keychain.init(password);
+// ---------------------- Helpers ----------------------
 
-  const [repr, hash] = await kc.dump();
-  fs.writeFileSync(VAULT_FILE, JSON.stringify({ repr, hash }, null, 2));
+function resetAutolock() {
+  // clear any existing timers
+  if (autolockTimer) {
+    clearTimeout(autolockTimer);
+    autolockTimer = null;
+  }
+  if (warningTimer) {
+    clearTimeout(warningTimer);
+    warningTimer = null;
+  }
+  warned = false;
 
-  console.log("Vault initialized and saved to vault.json");
+  // if no vault loaded, nothing to do
+  if (!kc) return;
+
+  // set warning timer (autolock - warning)
+  const warnDelay = Math.max(0, AUTOLOCK_MS - WARNING_BEFORE_MS);
+  warningTimer = setTimeout(() => {
+    if (!kc) return;
+    warned = true;
+    console.log("\n⚠️ 20 seconds until auto-lock…");
+    rl.prompt();
+  }, warnDelay);
+
+  // set autolock timer
+  autolockTimer = setTimeout(() => {
+    if (!kc) return;
+    kc = null;
+    warned = false;
+    console.log("\n⚠️ Session timed out. Vault locked.");
+    rl.prompt();
+  }, AUTOLOCK_MS);
 }
 
-async function loadVault() {
-  if (!fs.existsSync(VAULT_FILE)) {
-    console.error("No vault.json file found. Run: node pm.js init");
-    process.exit(1);
+async function saveVault(keychain) {
+  const [repr, hash] = await keychain.dump();
+  fs.writeFileSync(VAULT_FILE, JSON.stringify({ repr, hash }, null, 2));
+}
+
+function safeReadJsonFile(filename) {
+  try {
+    const txt = fs.readFileSync(filename, "utf8");
+    return JSON.parse(txt);
+  } catch (e) {
+    return null;
+  }
+}
+
+function generatePassword(length = 16) {
+  const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+[]{}<>?/~";
+  const bytes = new Uint8Array(length);
+  if (webcrypto && webcrypto.getRandomValues) {
+    webcrypto.getRandomValues(bytes);
+  } else {
+    require("crypto").randomFillSync(bytes);
+  }
+  let out = "";
+  for (let i = 0; i < length; i++) out += charset[bytes[i] % charset.length];
+  return out;
+}
+
+function promptHidden(text) {
+  return prompt.hide(text);
+}
+
+function confirmPrompt(question) {
+  const r = prompt(`${question} (y/N): `);
+  return r && r.toLowerCase() === "y";
+}
+
+// print help
+function printHelp() {
+  console.log(`
+Available Commands:
+  init                          Create a new vault
+  help                          Show this help menu
+  set <domain> <password>       Store password
+  get <domain>                  Retrieve password
+  update <domain> <password>    Update password (requires master auth)
+  remove <domain>               Delete a password entry
+  clear <domain>                Clear the password for a domain (leave domain present)
+  clear vault                   Delete entire vault (requires master auth + confirm)
+  list                          List stored domains (friendly names)
+  search <term>                 Search domains by substring
+  generate [length]             Generate a secure password (default 16)
+  copy <domain>                 Copy password to clipboard (tries clipboardy then fallbacks)
+  export <file>                 Export encrypted vault file (backup)
+  import <file>                 Import encrypted vault file (requires master password)
+  unlock                        Unlock the vault
+  lock                          Lock the vault (forget loaded keys)
+  restart                       Restart the CLI (soft)
+  save                          Save vault to disk
+  exit                          Quit the CLI
+`);
+}
+
+// ---------------------- Vault load/save ----------------------
+
+async function loadVaultInteractive() {
+  if (!fs.existsSync(VAULT_FILE)) return null;
+
+  const file = safeReadJsonFile(VAULT_FILE);
+  if (!file || !file.repr || !file.hash) {
+    console.log("vault.json is not in the expected format.");
+    return null;
   }
 
-  const file = JSON.parse(fs.readFileSync(VAULT_FILE, "utf8"));
-  const password = await prompt("Enter master password: ", true);
+  const pw = promptHidden("Master password: ");
+  try {
+    const loaded = await Keychain.load(pw, file.repr, file.hash);
+    loaded.reverse = loaded.reverse || {};
+    kc = loaded;
+    resetAutolock();
+    return loaded;
+  } catch (e) {
+    console.log("Failed to load vault:", (e && e.toString) ? e.toString() : e);
+    return null;
+  }
+}
+
+// ---------------------- REPL ----------------------
+
+console.log("-----------------------------------");
+console.log("🔐 Password Manager CLI");
+console.log("-----------------------------------");
+
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
+  prompt: "pm> ",
+});
+
+// add single data listener to reset autolock on any keypress
+if (!dataListenerAdded) {
+  process.stdin.on("data", () => {
+    resetAutolock();
+  });
+  dataListenerAdded = true;
+}
+
+(async function startup() {
+  kc = await loadVaultInteractive();
+  if (!kc) {
+    console.log("No existing vault loaded. Type 'init' to create one.");
+  } else {
+    console.log("Vault loaded.");
+  }
+  rl.prompt();
+})();
+
+// main line handler
+rl.on("line", async (line) => {
+  resetAutolock();
+
+  const raw = line.trim();
+  if (!raw) {
+    rl.prompt();
+    return;
+  }
+
+  const args = raw.split(/\s+/);
+  const cmd = args[0].toLowerCase();
 
   try {
-    const kc = await Keychain.load(password, file.repr, file.hash);
-    return kc;
-  } catch (e) {
-    console.error("❌ Failed to load vault:", e);
-    process.exit(1);
+    switch (cmd) {
+      case "help":
+        printHelp();
+        break;
+
+      case "init": {
+        if (fs.existsSync(VAULT_FILE)) {
+          if (!confirmPrompt("A vault.json already exists. Overwrite?")) {
+            console.log("Aborted.");
+            break;
+          }
+        }
+        const pw = promptHidden("Set master password: ");
+        const confirm = promptHidden("Confirm master password: ");
+        if (pw !== confirm) {
+          console.log("Passwords do not match. Aborted.");
+          break;
+        }
+        kc = await Keychain.init(pw);
+        kc.reverse = kc.reverse || {};
+        await saveVault(kc);
+        console.log("Vault created.");
+        break;
+      }
+
+      case "set": {
+        if (args.length < 3) {
+          console.log("Usage: set <domain> <password> eg set example.com mypassword");
+          break;
+        }
+        if (!kc) {
+          console.log("No vault loaded. Use 'init' first.");
+          break;
+        }
+        const domain = args[1];
+        const password = args.slice(2).join(" ");
+        await kc.set(domain, password);
+        await saveVault(kc);
+        console.log(`Saved password for ${domain}`);
+        break;
+      }
+
+      case "get": {
+        if (args.length < 2) {
+          console.log("Usage: get <domain> eg get example.com");
+          break;
+        }
+        if (!kc) {
+          console.log("No vault loaded.");
+          break;
+        }
+        const domain = args[1];
+        const pw = await kc.get(domain);
+        if (pw === null) console.log("Not found.");
+        else console.log(pw);
+        break;
+      }
+
+      case "update": {
+        if (args.length < 3) {
+          console.log("Usage: update <domain> <newpassword> eg update example.com newpassword");
+          break;
+        }
+        if (!kc) {
+          console.log("No vault loaded.");
+          break;
+        }
+        const domain = args[1];
+        const newpw = args.slice(2).join(" ");
+
+        const checkPw = promptHidden("Re-enter master password: ");
+        const file = safeReadJsonFile(VAULT_FILE);
+        try {
+          await Keychain.load(checkPw, file.repr, file.hash);
+
+          await kc.set(domain, newpw);
+          await saveVault(kc);
+          console.log(`Updated password for ${domain}`);
+        } catch {
+          console.log("Incorrect master password. Update aborted.");
+        }
+
+        break;
+      }
+
+      case "remove": {
+        if (args.length < 2) {
+          console.log("Usage: remove <domain>");
+          break;
+        }
+        if (!kc) {
+          console.log("No vault loaded.");
+          break;
+        }
+        const domain = args[1];
+        const ok = await kc.remove(domain);
+        if (ok) {
+          await saveVault(kc);
+          console.log(`Removed ${domain}`);
+        } else {
+          console.log("No such domain.");
+        }
+        break;
+      }
+
+      case "clear": {
+        if (args.length < 2) {
+          console.log("Usage: clear <domain> | clear vault");
+          break;
+        }
+        const target = args[1].toLowerCase();
+        if (target === "vault") {
+          if (!kc) {
+            console.log("No vault loaded.");
+            break;
+          }
+          // require master auth
+          const checkPw = promptHidden("Enter master password to confirm: ");
+          try {
+            const file = safeReadJsonFile(VAULT_FILE);
+            await Keychain.load(checkPw, file.repr, file.hash);
+
+            if (!confirmPrompt("Are you sure you want to DELETE the entire vault?")) {
+              console.log("Operation cancelled.");
+              break;
+            }
+
+            fs.unlinkSync(VAULT_FILE);
+            kc = null;
+            console.log("Vault deleted.");
+          } catch {
+            console.log("Incorrect master password. Abort.");
+          }
+        } else {
+          // clear domain password (set encrypted empty string)
+          if (!kc) {
+            console.log("No vault loaded.");
+            break;
+          }
+          const domain = args[1];
+          await kc.set(domain, "");
+          await saveVault(kc);
+          console.log(`Cleared password for ${domain}`);
+        }
+        break;
+      }
+
+      case "list": {
+        if (!kc) {
+          console.log("No vault loaded.");
+          break;
+        }
+        const friendly = Object.values(kc.reverse || {});
+        console.log("Stored domains:");
+        if (friendly.length === 0) {
+          console.log("  (none)");
+        } else {
+          for (const d of friendly) console.log(" -", d);
+        }
+        break;
+      }
+
+      case "search": {
+        if (!kc) {
+          console.log("No vault loaded.");
+          break;
+        }
+        if (args.length < 2) {
+          console.log("Usage: search <term> eg search example");
+          break;
+        }
+        const term = args.slice(1).join(" ").toLowerCase();
+        const matches = Object.values(kc.reverse || {}).filter((d) =>
+          d.toLowerCase().includes(term)
+        );
+        if (matches.length === 0) {
+          console.log("No matches.");
+        } else {
+          for (const m of matches) console.log(" -", m);
+        }
+        break;
+      }
+
+      case "generate": {
+        const len = args.length >= 2 ? parseInt(args[1], 10) || 16 : 16;
+        if (len <= 0 || len > 512) {
+          console.log("Length must be between 1 and 512. eg generate 20");
+          break;
+        }
+        console.log(generatePassword(len));
+        break;
+      }
+
+      case "copy": {
+        if (!kc) {
+          console.log("No vault loaded.");
+          break;
+        }
+        if (args.length < 2) {
+          console.log("Usage: copy <domain> eg copy example.com");
+          break;
+        }
+        const domain = args[1];
+        const pw = await kc.get(domain);
+        if (pw === null) {
+          console.log("No such entry.");
+          break;
+        }
+        try {
+          await copyToClipboard(pw);
+          console.log("Copied to clipboard!");
+        } catch (e) {
+          console.log("Failed to copy to clipboard:", e && e.toString ? e.toString() : e);
+        }
+        break;
+      }
+
+      case "export": {
+        if (args.length < 2) {
+          console.log("Usage: export <filename> eg export backup.json");
+          break;
+        }
+        if (!fs.existsSync(VAULT_FILE)) {
+          console.log("No vault to export.");
+          break;
+        }
+        const target = args[1];
+        fs.copyFileSync(VAULT_FILE, target);
+        console.log(`Exported vault to ${target}`);
+        break;
+      }
+
+      case "import": {
+        if (args.length < 2) {
+          console.log("Usage: import <filename> eg import backup.json");
+          break;
+        }
+        const filePath = args[1];
+        if (!fs.existsSync(filePath)) {
+          console.log("File not found.");
+          break;
+        }
+        const file = safeReadJsonFile(filePath);
+        if (!file || !file.repr || !file.hash) {
+          console.log("File is not a valid vault export.");
+          break;
+        }
+        // require master password for imported vault
+        const importPw = promptHidden("Master password for imported vault: ");
+        try {
+          await Keychain.load(importPw, file.repr, file.hash);
+          // replace local vault
+          if (fs.existsSync(VAULT_FILE)) {
+            if (!confirmPrompt("Overwrite existing vault.json with imported file?")) {
+              console.log("Import cancelled.");
+              break;
+            }
+          }
+          fs.copyFileSync(filePath, VAULT_FILE);
+          kc = await loadVaultInteractive(); // reload using interactive loader
+          console.log("Import successful. Vault loaded.");
+        } catch {
+          console.log("Incorrect master password for imported vault. Import aborted.");
+        }
+        break;
+      }
+      case "unlock": {
+        if (!fs.existsSync(VAULT_FILE)) {
+          console.log("No vault.json found. Use 'init' to create a new vault.");
+          break;
+        }
+
+        const file = safeReadJsonFile(VAULT_FILE);
+        if (!file || !file.repr || !file.hash) {
+          console.log("vault.json is corrupted or invalid.");
+          break;
+        }
+
+        const pw = promptHidden("Master password: ");
+
+        try {
+          kc = await Keychain.load(pw, file.repr, file.hash);
+          kc.reverse = kc.reverse || {};
+          console.log("Vault unlocked.");
+          resetAutolock();
+        } catch (e) {
+          console.log("Incorrect master password.");
+        }
+
+        break;
+      }
+
+
+      case "lock": {
+        if (!kc) {
+          console.log("Vault is already locked.");
+          break;
+        }
+        kc = null;
+        console.log("Vault locked.");
+        break;
+      }
+
+      case "restart": {
+        console.log("Restarting CLI...");
+        kc = null;
+
+        if (fs.existsSync(VAULT_FILE)) {
+          const file = safeReadJsonFile(VAULT_FILE);
+          if (file && file.repr && file.hash) {
+            console.log("Reloading vault...");
+            const pw = promptHidden("Master password: ");
+            try {
+              kc = await Keychain.load(pw, file.repr, file.hash);
+              kc.reverse = kc.reverse || {};
+              console.log("Vault reloaded.");
+            } catch (e) {
+              console.log("Failed to reload vault. You'll need to run 'init' or 'load' manually.");
+              kc = null;
+            }
+          } else {
+            console.log("vault.json is corrupted or unreadable.");
+          }
+        } else {
+          console.log("No vault found. Use 'init' to create one.");
+        }
+
+        rl.prompt();
+        break;
+      }
+
+      case "save": {
+        if (!kc) {
+          console.log("No vault loaded.");
+          break;
+        }
+        await saveVault(kc);
+        console.log("Vault saved.");
+        break;
+      }
+
+      case "exit":
+      case "quit":
+        console.log("Goodbye.");
+        process.exit(0);
+        break;
+
+      default:
+        console.log("Unknown command. Type 'help'.");
+    }
+  } catch (err) {
+    console.log("Error:", err && err.toString ? err.toString() : err);
   }
-}
 
-async function setPassword(domain, value) {
-  const kc = await loadVault();
-  await kc.set(domain, value);
+  rl.prompt();
+});
 
-  const [repr, hash] = await kc.dump();
-  fs.writeFileSync(VAULT_FILE, JSON.stringify({ repr, hash }, null, 2));
+rl.on("SIGINT", () => {
+  console.log("\n(To exit, type 'exit' or press Ctrl+C again.)");
+  rl.prompt();
+});
 
-  console.log(`Password saved for ${domain}`);
-}
-
-async function getPassword(domain) {
-  const kc = await loadVault();
-  const result = await kc.get(domain);
-
-  if (result === null) {
-    console.log("No password stored for that domain.");
-  } else {
-    console.log(`Password for ${domain}: ${result}`);
-  }
-}
-
-async function removePassword(domain) {
-  const kc = await loadVault();
-  const ok = await kc.remove(domain);
-
-  const [repr, hash] = await kc.dump();
-  fs.writeFileSync(VAULT_FILE, JSON.stringify({ repr, hash }, null, 2));
-
-  if (ok) {
-    console.log(`Removed password for ${domain}`);
-  } else {
-    console.log("No such domain found.");
-  }
-}
-
-async function listDomains() {
-  const kc = await loadVault();
-  const domains = Object.keys(kc.kvs);
-
-  console.log("Stored domains:");
-  for (const d of domains) console.log(" -", d);
-}
-
-
-async function main() {
-  const cmd = process.argv[2];
-
-  switch (cmd) {
-    case "init":
-      await initVault();
-      break;
-
-    case "set":
-      await setPassword(process.argv[3], process.argv[4]);
-      break;
-
-    case "get":
-      await getPassword(process.argv[3]);
-      break;
-
-    case "remove":
-      await removePassword(process.argv[3]);
-      break;
-
-    case "list":
-      await listDomains();
-      break;
-
-    default:
-      console.log(`
-Password Manager CLI
-
-Usage:
-  node pm.js init                      Create a new vault
-  node pm.js set <domain> <password>   Store password
-  node pm.js get <domain>              Retrieve password
-  node pm.js remove <domain>           Delete a password
-  node pm.js list                      List stored passwords
-`);
-  }
-}
-
-main();
+process.on("exit", () => {
+  if (autolockTimer) clearTimeout(autolockTimer);
+  if (warningTimer) clearTimeout(warningTimer);
+});

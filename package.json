@@ -3,10 +3,9 @@
   "version": "1.0.0",
   "description": "Secure password manager with cryptography",
   "main": "password-manager.js",
- "scripts": {
-  "test": "mocha test --timeout 20000"
-},
-
+  "scripts": {
+    "test": "mocha test --timeout 20000"
+  },
   "keywords": [
     "cryptography",
     "password-manager",
@@ -18,5 +17,9 @@
     "chai": "^4.3.10",
     "expect.js": "^0.3.1",
     "mocha": "^10.8.2"
+  },
+  "dependencies": {
+    "clipboardy": "^5.0.1",
+    "prompt-sync": "^4.2.0"
   }
 }
