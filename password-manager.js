@@ -1,6 +1,5 @@
 "use strict";
 
-// Import SubtleCrypto for Node.js
 const { subtle } = require("crypto").webcrypto;
 
 // ==================== HELPER UTILITIES ====================
@@ -130,7 +129,7 @@ class Keychain {
         this.salt = salt;
 
         this.kvs = {};
-        this.reverse = {};   // MUST BE HERE
+        this.reverse = {};   
     }
 
     static async init(password) {
@@ -154,7 +153,7 @@ class Keychain {
         const reprObj = {
             salt: encodeBuffer(this.salt),
             kvs: this.kvs,
-            reverse: this.reverse,    // STORED CORRECTLY
+            reverse: this.reverse,   
             verify: encodeBuffer(verifySig)
         };
 
@@ -197,7 +196,7 @@ class Keychain {
 
         const kc = new Keychain(masterKey, hmacKey, aesKey, saltBuf);
         kc.kvs = data.kvs || {};
-        kc.reverse = data.reverse || {};   // RESTORED CORRECTLY
+        kc.reverse = data.reverse || {};  
 
         return kc;
     }

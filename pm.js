@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 "use strict";
 
 /**
@@ -7,6 +6,8 @@
  * Requirements:
  *   npm install prompt-sync
  *   npm install clipboardy
+ * 
+ * and ofcourse, Node.js 
  *
  * Usage:
  *   node pm.js
@@ -19,7 +20,7 @@ const readline = require("readline");
 const { spawn } = require("child_process");
 const Keychain = require("./password-manager");
 const prompt = require("prompt-sync")({ sigint: true });
-
+const chalk = require("chalk");
 const { webcrypto } = require("crypto");
 
 // clipboard 
@@ -100,7 +101,7 @@ function resetAutolock() {
   warningTimer = setTimeout(() => {
     if (!kc) return;
     warned = true;
-    console.log("\n⚠️ 20 seconds until auto-lock…");
+    console.log("\n 20 seconds until auto-lock…");
     rl.prompt();
   }, warnDelay);
 
@@ -109,7 +110,7 @@ function resetAutolock() {
     if (!kc) return;
     kc = null;
     warned = false;
-    console.log("\n⚠️ Session timed out. Vault locked.");
+    console.log(chalk.red.bold("\nSession timed out. Vault locked."));
     rl.prompt();
   }, AUTOLOCK_MS);
 }
@@ -152,7 +153,7 @@ function confirmPrompt(question) {
 
 // print help
 function printHelp() {
-  console.log(`
+  console.log(chalk.greenBright(`
 Available Commands:
   init                          Create a new vault
   help                          Show this help menu
@@ -173,7 +174,7 @@ Available Commands:
   restart                       Restart the CLI (soft)
   save                          Save vault to disk
   exit                          Quit the CLI
-`);
+`));
 }
 
 // ---------------------- Vault load/save ----------------------
@@ -259,7 +260,7 @@ rl.on("line", async (line) => {
         const pw = promptHidden("Set master password: ");
         const confirm = promptHidden("Confirm master password: ");
         if (pw !== confirm) {
-          console.log("Passwords do not match. Aborted.");
+          console.log(chalk.red("Passwords do not match. Aborted."));
           break;
         }
         kc = await Keychain.init(pw);
@@ -527,7 +528,7 @@ rl.on("line", async (line) => {
         try {
           kc = await Keychain.load(pw, file.repr, file.hash);
           kc.reverse = kc.reverse || {};
-          console.log("Vault unlocked.");
+          console.log(chalk.greenBright("Vault unlocked."));
           resetAutolock();
         } catch (e) {
           console.log("Incorrect master password.");
@@ -584,6 +585,43 @@ rl.on("line", async (line) => {
         console.log("Vault saved.");
         break;
       }
+      case "delete-vault": {
+        if (!fs.existsSync(VAULT_FILE)) {
+            console.log("No vault.json found.");
+            break;
+        }
+
+        // require password confirmation
+        const pw = promptHidden("Enter master password: ");
+        const file = safeReadJsonFile(VAULT_FILE);
+
+        try {
+            await Keychain.load(pw, file.repr, file.hash); // validate password
+        } catch {
+            console.log("Incorrect password. Abort.");
+            break;
+        }
+
+        if (!confirmPrompt(chalk.red.bold("Are you Certain sure you want to DELETE the entire vault? This cannot be undone."))) {
+            console.log("Cancelled.");
+            break;
+        }
+
+        try {
+            fs.unlinkSync(VAULT_FILE);
+            kc = null;
+
+            if (autolockTimer) clearTimeout(autolockTimer);
+            if (warningTimer) clearTimeout(warningTimer);
+
+            console.log("Vault deleted.");
+        } catch (e) {
+            console.log("Failed to delete vault:", e.toString ? e.toString() : e);
+        }
+
+        break;
+    }
+
 
       case "exit":
       case "quit":

@@ -23,7 +23,7 @@ class Keychain {
         this.aesKey = aesKey;
         this.salt = salt;
         this.kvs = {};
-        this.reverse = {};     // <-- required
+        this.reverse = {};     
     }
 
     // Initialize new vault
@@ -49,7 +49,7 @@ class Keychain {
             salt: encodeBuffer(this.salt),
             kvs: this.kvs,
             reverse: this.reverse,
-            verify: encodeBuffer(verifySigBuf)   // <<< correct variable
+            verify: encodeBuffer(verifySigBuf)   
         };
 
         const json = JSON.stringify(reprObj);
@@ -104,7 +104,7 @@ class Keychain {
 
         const kc = new Keychain(masterKey, hmacKey, aesKey, saltBuf);
         kc.kvs = data.kvs || {};
-        kc.reverse = data.reverse || {};   // <-- restore correctly
+        kc.reverse = data.reverse || {};   
 
         // final sanity check: decrypt one entry if exists
         const keys = Object.keys(kc.kvs);
