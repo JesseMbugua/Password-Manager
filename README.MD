@@ -38,7 +38,7 @@ cd Password-Manager
 
 # Install dependencies
 
-npm install
+npm install prompt-sync clipboardy mocha expect.js 
 
 ### 2. Running Tests
 
