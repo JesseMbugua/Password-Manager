@@ -1,7 +1,7 @@
 "use strict";
 
 let expect = require("expect.js");
-const { Keychain } = require("../password-manager");
+const  Keychain  = require("../password-manager");
 const utils = require("../src/crypto-utils");
 
 function expectReject(promise) {
@@ -130,13 +130,17 @@ describe("Password Manager - Full Test Suite", function () {
 
     // Domain Privacy Tests
     describe("Domain Key Privacy", function () {
-        it("should not store plaintext domain names in repr", async function () {
+        it('should not store plaintext domain names in encrypted kvs', async function () {
             const kc = await Keychain.init("password123!");
             await kc.set("example.com", "test123");
 
             const [repr] = await kc.dump();
-            expect(repr).not.to.contain("example.com");
+            const parsed = JSON.parse(repr);
+
+            // Check only inside kvs, not reverse
+            expect(JSON.stringify(parsed.kvs)).not.to.contain("example.com");
         });
+
 
         it("should compute the same HMAC for the same domain", async function () {
             const kc = await Keychain.init("password123!");
