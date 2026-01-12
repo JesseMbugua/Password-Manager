@@ -22,6 +22,12 @@ const Keychain = require("./password-manager");
 const prompt = require("prompt-sync")({ sigint: true });
 const chalk = require("chalk");
 const { webcrypto } = require("crypto");
+const CONFIG_FILE = "config.json"
+const DEFAULT_CONFIG = { 
+  autolockMs: 60_000,
+  clipboardClearMs: 15_000,
+  auditIgnores: {}, 
+}
 
 // clipboard 
 let clipboardModule = null;
@@ -67,10 +73,29 @@ async function copyToClipboard(text) {
     });
   });
 }
+async function scheduleClipboardClear(originalValue, delayMs) {
+  if (!clipboardModule) return;
+  const api = clipboardModule.default || clipboardModule
+  if(!api.read || !api.write) return;
+
+  setTimeout(async () => {
+    try {
+      const current = await api.read();
+      if(current === originalValue) {
+        await api.write("");
+      }
+    } catch {
+
+    }
+  }, delayMs)
+  
+  
+}
 
 // config
 const VAULT_FILE = "vault.json";
-const AUTOLOCK_MS = 1 * 60 * 1000; // 1 minute inactivity - auto-lock
+// const AUTOLOCK_MS = 1 * 60 * 1000; // 1 minute inactivity - auto-lock
+let config = loadConfig()
 const WARNING_BEFORE_MS = 20 * 1000; // 20 seconds -  warning
 
 let kc = null;
@@ -80,6 +105,10 @@ let warned = false;
 let dataListenerAdded = false;
 
 // ---------------------- Helpers ----------------------
+
+function clearTerminal() {
+  process.stdout.write("\x1Bc");
+}
 
 function resetAutolock() {
   // clear any existing timers
@@ -95,7 +124,7 @@ function resetAutolock() {
 
   // if no vault loaded, nothing to do
   if (!kc) return;
-
+/*
   // set warning timer (autolock - warning)
   const warnDelay = Math.max(0, AUTOLOCK_MS - WARNING_BEFORE_MS);
   warningTimer = setTimeout(() => {
@@ -110,11 +139,34 @@ function resetAutolock() {
     if (!kc) return;
     kc = null;
     warned = false;
+    clearTerminal();
     console.log(chalk.red.bold("\nSession timed out. Vault locked."));
     rl.prompt();
   }, AUTOLOCK_MS);
 }
+*/
+if (config.autolockMs === Infinity) return;
 
+const warnDelay = Math.max(
+  0,
+  config.autolockMs - WARNING_BEFORE_MS
+);
+
+warningTimer = setTimeout(() => {
+  if (!kc) return;
+  warned = true;
+  console.log("\n 20 seconds until auto-lock…");
+  rl.prompt();
+}, warnDelay);
+
+autolockTimer = setTimeout(() => {
+  if (!kc) return;
+  kc = null;
+  warned = false;
+  console.log(chalk.red.bold("\nSession timed out. Vault locked."));
+  rl.prompt();
+}, config.autolockMs);
+}
 async function saveVault(keychain) {
   const [repr, hash] = await keychain.dump();
   fs.writeFileSync(VAULT_FILE, JSON.stringify({ repr, hash }, null, 2));
@@ -129,6 +181,21 @@ function safeReadJsonFile(filename) {
   }
 }
 
+// config config
+function loadConfig() {
+  try {
+    const raw = fs.readFileSync(CONFIG_FILE, "utf8")
+    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+  }
+  catch {
+    return { ...DEFAULT_CONFIG };
+  }
+}
+function saveConfig(cfg) {
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+}
+
+/* OLD generatePassword function
 function generatePassword(length = 16) {
   const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*()-_=+[]{}<>?/~";
   const bytes = new Uint8Array(length);
@@ -141,6 +208,127 @@ function generatePassword(length = 16) {
   for (let i = 0; i < length; i++) out += charset[bytes[i] % charset.length];
   return out;
 }
+  */
+
+/*
+New version. it will meet most password requirements eg:
+  - Atleast 1 uppercase character
+  - Atleast 1 special character
+  - Atleast 1 number
+  - Atleast 1 lowercase character
+
+These rules will only be enforced
+*/
+function generatePassword(length = 16) {
+
+  const upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+  const lower = "abcdefghijklmnopqrstuvwxyz";
+  const nums = "1234567890";
+  const special = "!@#$%^&*()-_=+[]{}<>?/~";
+  const all = upper + lower + nums + special;
+
+  const crypto = require("crypto")
+  const bytes = new Uint8Array(length)
+  crypto.randomFillSync(bytes);
+
+  if (length < 4) {
+    let out = "";
+    for (let i = 0; i < length; i++) {
+      out += all[bytes[i] % all.length];
+    }
+   return out;
+  }
+
+  let password = [
+    upper[bytes[0] % upper.length],
+    lower[bytes[1] % lower.length], 
+    nums[bytes[2] % nums.length],
+    special[bytes[3] % special.length],
+  ];
+  for(let i = 4; i < length; i++) {
+    password.push(all[bytes[i] % all.length]);;
+  }
+
+  for(let i = password.length -1; i > 0; i--) {
+    const j = bytes[i] % (i + 1);
+    [password[i], password[j]] = [password[j], password[i]]
+  }
+  return password.join("");
+}
+
+function generateCode(length = 4 ){
+  const charset = "0123456789";
+  const bytes = new Uint8Array(length);
+  if (webcrypto && webcrypto.getRandomValues) {
+    webcrypto.getRandomValues(bytes);
+  } else {
+    require("crypto").randomFillSync(bytes);
+  }
+  let out = "";
+  for (let i = 0; i < length; i++) out += charset[bytes[i] % charset.length];
+  return out;
+}
+
+function maskPassword(pw, head = 2, tail = 2) {
+  if (pw === "") return "(empty)";
+  if (!pw) return "(none)";
+
+  if (pw.length <= head + tail) {
+    return "*".repeat(pw.length);
+  }
+
+  return (
+    pw.slice(0, head) +
+    "*".repeat(pw.length - head - tail) +
+    pw.slice(-tail)
+  );
+}
+function printAudit(findings) {
+  let issues = 0;
+
+  if (findings.empty.length) {
+    issues++;
+    console.log("\nEmpty passwords:");
+    findings.empty.forEach(d => console.log(" -", d));
+  }
+
+  if (findings.short.length) {
+    issues++;
+    console.log("\nShort passwords (< 8 chars):");
+    findings.short.forEach(d => console.log(" -", d));
+  }
+
+  if (findings.numeric.length) {
+    issues++;
+    console.log("\nNumeric-only passwords:");
+    findings.numeric.forEach(d => console.log(" -", d));
+  }
+
+  if (findings.reused.length) {
+    issues++;
+    console.log("\nReused passwords:");
+    findings.reused.forEach(group => {
+      console.log(" -", group.join(", "));
+    });
+  }
+
+  if (issues === 0) {
+    console.log(chalk.green("✔ No issues found. Your vault looks good."));
+  } else {
+    console.log(
+      chalk.yellow(
+        `\nAudit complete: ${issues} issue type(s) detected.`
+      )
+    );
+  }
+}
+function isIgnored(domain, rule) {
+  return (
+    config.auditIgnores?.[domain]?.includes(rule)
+  );
+}
+
+
 
 function promptHidden(text) {
   return prompt.hide(text);
@@ -158,14 +346,25 @@ Available Commands:
   init                          Create a new vault
   help                          Show this help menu
   set <domain> <password>       Store password
-  get <domain>                  Retrieve password
+  get <domain>                  Retrieve password or use show <domain> but it is hidden. Some characters are revealed.
+  get <domain> --show || show <domain> --show               The --show flag shows the whole password
+  show <domain>                 Same as get
   update <domain> <password>    Update password (requires master auth)
   remove <domain>               Delete a password entry
   clear <domain>                Clear the password for a domain (leave domain present)
   clear vault                   Delete entire vault (requires master auth + confirm)
+  clear -t                      Clears the terminal
+  clear --terminal              ""
+  clear --t                     ""
+  cls                           ""
+  ignore add <domain> <rule>    used to add a domain to an ignored list for the audit not to clock it
+  ignore remove <domain> <rule> remove domain from ignored list
+  ignore list                   show ignore list
+
   list                          List stored domains (friendly names)
   search <term>                 Search domains by substring
   generate [length]             Generate a secure password (default 16)
+  numgen [length]               Generates a numerical code/ pin (default 4)
   copy <domain>                 Copy password to clipboard (tries clipboardy then fallbacks)
   export <file>                 Export encrypted vault file (backup)
   import <file>                 Import encrypted vault file (requires master password)
@@ -173,7 +372,10 @@ Available Commands:
   lock                          Lock the vault (forget loaded keys)
   restart                       Restart the CLI (soft)
   save                          Save vault to disk
-  exit                          Quit the CLI
+  config show                   Shows available configurations
+  config autolock <time|off>    Change the autolock timeout. example usage config autolock 6m
+  config clipboard <time|off>   Change clipboard clear time. example usage config clipboard 30s
+  exit/quit/q/escape            Quit the CLI
 `));
 }
 
@@ -272,6 +474,54 @@ rl.on("line", async (line) => {
 
       case "set": {
         if (args.length < 3) {
+            console.log("Usage:");
+            console.log(" set <domain> <password>");
+            console.log(" set <domain> generate <length>");
+            console.log(" set <domain> numgen <length>");
+            break;
+        }
+
+        if (!kc) {
+            console.log("No vault loaded. Use 'init' first.");
+            break;
+        }
+
+        const domain = args[1];
+        const mode = args[2];
+        let password;
+
+        // ---- set domain generate 10
+        if (mode === "generate") {
+            const length = parseInt(args[3]);
+            if (!length || length < 4) {
+                console.log("Password length must be at least 4.");
+                break;
+            }
+            password = generatePassword(length);
+        }
+
+        else if (mode === "numgen") {
+            const length = parseInt(args[3]);
+            if (!length || length < 3) {
+                console.log("Number length must be at least 3.");
+                break;
+            }
+            password = generateCode(length);
+        }
+
+        else {
+            password = args.slice(2).join(" ");
+        }
+
+        await kc.set(domain, password);
+        await saveVault(kc);
+        console.log(`Saved password for ${domain}`);
+        break;
+    }
+
+      /*
+      case "set": {
+        if (args.length < 3) {
           console.log("Usage: set <domain> <password> eg set example.com mypassword");
           break;
         }
@@ -286,8 +536,10 @@ rl.on("line", async (line) => {
         console.log(`Saved password for ${domain}`);
         break;
       }
-
-      case "get": {
+      */
+/*
+      case "get":
+      case "show": {
         if (args.length < 2) {
           console.log("Usage: get <domain> eg get example.com");
           break;
@@ -302,6 +554,32 @@ rl.on("line", async (line) => {
         else console.log(pw);
         break;
       }
+        */
+      case "get":
+      case "show": {
+        if (args.length < 2) {
+          console.log("Usage: get <domain> [--show]");
+          break;
+        }
+        if (!kc) {
+          console.log("No vault loaded.");
+          break;
+        }
+
+        const domain = args[1];
+        const reveal = args.includes("--show");
+
+        const pw = await kc.get(domain);
+        if (pw === null) {
+          console.log("Not found.");
+        } else if (reveal) {
+          console.log(pw);
+        } else {
+          console.log(maskPassword(pw));
+        }
+        break;
+      }
+
 
       case "update": {
         if (args.length < 3) {
@@ -350,18 +628,27 @@ rl.on("line", async (line) => {
         break;
       }
 
+      case "cls" : {
+        clearTerminal();
+        break;
+      }
+
       case "clear": {
         if (args.length < 2) {
           console.log("Usage: clear <domain> | clear vault");
           break;
         }
         const target = args[1].toLowerCase();
+
+        if (flag === "-t" || flag ==="--terminal" || flag === "--t"){
+          clearTerminal();
+          break;
+        }
         if (target === "vault") {
           if (!kc) {
             console.log("No vault loaded.");
             break;
           }
-          // require master auth
           const checkPw = promptHidden("Enter master password to confirm: ");
           try {
             const file = safeReadJsonFile(VAULT_FILE);
@@ -379,7 +666,7 @@ rl.on("line", async (line) => {
             console.log("Incorrect master password. Abort.");
           }
         } else {
-          // clear domain password (set encrypted empty string)
+          // clear domain password 
           if (!kc) {
             console.log("No vault loaded.");
             break;
@@ -406,6 +693,65 @@ rl.on("line", async (line) => {
         }
         break;
       }
+
+      case "config": {
+        if (args.length < 2) {
+          console.log("Usage:");
+          console.log(" config show");
+          console.log(" config autolock <time|off>");
+          break;
+        }
+
+        const sub = args[1];
+
+        if (sub === "show") {
+          console.log("Current configuration:");
+          console.log(` autolock: ${
+            config.autolockMs === Infinity
+              ? "off"
+              : config.autolockMs + " ms"
+          }`);
+          console.log(`Clipboard autoclear : ${config.clipboardClearMs === Infinity ? "off" : config.clipboardClearMs + "ms"}`)
+          break;
+        }
+
+        if (sub === "autolock") {
+          const val = args[2];
+          if (!val) {
+            console.log("Usage: config autolock <5m|30s|off>");
+            break;
+          }
+
+          if (val === "off") {
+            config.autolockMs = Infinity;
+          } else {
+            const match = val.match(/^(\d+)(s|m|h)$/);
+            if (!match) {
+              console.log("Invalid time format. Use 30s, 5m, 1h");
+              break;
+            }
+
+            const n = parseInt(match[1], 10);
+            const unit = match[2];
+
+            const mult =
+              unit === "s" ? 1000 :
+              unit === "m" ? 60_000 :
+              3_600_000;
+
+            config.autolockMs = n * mult;
+          }
+
+          saveConfig(config);
+          console.log("Autolock updated.");
+          resetAutolock();
+          break;
+        }
+
+        console.log("Unknown config option.");
+        break;
+      }
+
 
       case "search": {
         if (!kc) {
@@ -437,6 +783,17 @@ rl.on("line", async (line) => {
         console.log(generatePassword(len));
         break;
       }
+      case "numgen": {
+        const len = args.length >= 2 ? parseInt(args[1], 10) || 4 : 4;
+          if (len <= 0 || len > 512) {
+            console.log("Length must be between 1 and 512. eg numgen 6");
+            break;
+          }
+          console.log(generateCode(len));
+          break;
+        }
+        
+      
 
       case "copy": {
         if (!kc) {
@@ -455,12 +812,121 @@ rl.on("line", async (line) => {
         }
         try {
           await copyToClipboard(pw);
-          console.log("Copied to clipboard!");
+          console.log("Copied to clipboard! \n Auto clears in 15, think fast!!!");
+          scheduleClipboardClear(pw, 15000);
         } catch (e) {
           console.log("Failed to copy to clipboard:", e && e.toString ? e.toString() : e);
         }
         break;
       }
+      case "audit": {
+        if (!kc) {
+          console.log("No vault loaded.");
+          break;
+        }
+
+        const findings = {
+          empty: [],
+          short: [],
+          numeric: [],
+          reused: [],
+        };
+
+        const seen = new Map(); 
+
+        for (const domain of Object.values(kc.reverse || {})) {
+          const pw = await kc.get(domain);
+
+          if (pw === null) continue;
+
+          if (pw === "") {
+            findings.empty.push(domain);
+            continue;
+          }
+
+          if (pw.length < 8 && !isIgnored(domain, "short")) {
+            findings.short.push(domain);
+          }
+
+
+          if (/^\d+$/.test(pw)) {
+            findings.numeric.push(domain);
+          }
+
+          // reuse detection 
+          if (!seen.has(pw)) {
+            seen.set(pw, []);
+          }
+          seen.get(pw).push(domain);
+        }
+
+        // collect reused passwords
+        for (const [_, domains] of seen.entries()) {
+          if (domains.length > 1) {
+            findings.reused.push(domains);
+          }
+        }
+
+        printAudit(findings);
+        break;
+      }
+
+      case "ignore": {
+        const action = args[1];
+
+        if (!action || action === "list") {
+          console.log("Audit ignores:");
+          if (!Object.keys(config.auditIgnores).length) {
+            console.log(" (none)");
+          } else {
+            for (const [d, rules] of Object.entries(config.auditIgnores)) {
+              console.log(` ${d}: ${rules.join(", ")}`);
+            }
+          }
+          break;
+        }
+
+        const domain = args[2];
+        const rules = args.slice(3);
+
+        if (!domain || !rules.length) {
+          console.log("Usage:");
+          console.log(" ignore add <domain> <rule>");
+          console.log(" ignore remove <domain> <rule>");
+          break;
+        }
+
+        config.auditIgnores[domain] ||= [];
+
+        if (action === "add") {
+          for (const r of rules) {
+            if (!config.auditIgnores[domain].includes(r)) {
+              config.auditIgnores[domain].push(r);
+            }
+          }
+          saveConfig(config);
+          console.log("Ignore rules added.");
+          break;
+        }
+
+        if (action === "remove") {
+          config.auditIgnores[domain] =
+            config.auditIgnores[domain].filter(r => r !== rules[0]);
+
+          if (config.auditIgnores[domain].length === 0) {
+            delete config.auditIgnores[domain];
+          }
+
+          saveConfig(config);
+          console.log("Ignore rule removed.");
+          break;
+        }
+
+        console.log("Unknown ignore command.");
+        break;
+      }
+
+
 
       case "export": {
         if (args.length < 2) {
@@ -544,6 +1010,7 @@ rl.on("line", async (line) => {
           break;
         }
         kc = null;
+        clearTerminal();
         console.log("Vault locked.");
         break;
       }
@@ -625,6 +1092,8 @@ rl.on("line", async (line) => {
 
       case "exit":
       case "quit":
+      case "q":
+      case "esc":
         console.log("Goodbye.");
         process.exit(0);
         break;
