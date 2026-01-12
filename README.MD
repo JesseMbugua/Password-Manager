@@ -22,7 +22,7 @@ This password manager is built with a strong emphasis on security, incorporating
 
 - **Rollback Attack Defense**: Uses a SHA-256 checksum of the entire database. This hash can be stored in a trusted location (like a separate flash drive) to verify that the database has not been tampered with or "rolled back" to a previous state by an adversary.
 
-## 🚀 Setup & Usage
+## Setup & Usage
 
 This project is designed to be run using Node.js.
 
@@ -38,7 +38,7 @@ cd Password-Manager
 
 # Install dependencies
 
-npm install
+npm install prompt-sync clipboardy mocha expect.js 
 
 ### 2. Running Tests
 
@@ -51,6 +51,8 @@ npm test
 ```
 
 You should see output showing **18 passing tests** covering:
+
+To use the password manager, you need to type node pm.js in your terminal in the directory of the cloned repo and you will be prompted to create a vault, type init to initialise one and you will need to set a master password eg 123456. You may not see anything appearing on the terminal as your key presses are hidden. once in the CLI of the system use the  command 'help' to view all available commands and how to use them. 
 
 - Initialization & key derivation
 - Encryption & decryption
