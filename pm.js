@@ -22,7 +22,8 @@ const Keychain = require("./password-manager");
 const prompt = require("prompt-sync")({ sigint: true });
 const chalk = require("chalk");
 const { webcrypto } = require("crypto");
-const CONFIG_FILE = "config.json"
+const CONFIG_FILE = path.join(__dirname, "config.js");
+
 const DEFAULT_CONFIG = { 
   autolockMs: 60_000,
   clipboardClearMs: 15_000,
@@ -184,16 +185,19 @@ function safeReadJsonFile(filename) {
 // config config
 function loadConfig() {
   try {
-    const raw = fs.readFileSync(CONFIG_FILE, "utf8")
-    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
-  }
-  catch {
+    delete require.cache[require.resolve(CONFIG_FILE)];
+    const userConfig = require(CONFIG_FILE);
+    return { ...DEFAULT_CONFIG, ...userConfig };
+  } catch {
     return { ...DEFAULT_CONFIG };
   }
 }
+
 function saveConfig(cfg) {
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+  const content = `module.exports = ${JSON.stringify(cfg, null, 2)};\n`;
+  fs.writeFileSync(CONFIG_FILE, content);
 }
+
 
 /* OLD generatePassword function
 function generatePassword(length = 16) {
@@ -360,7 +364,8 @@ Available Commands:
   ignore add <domain> <rule>    used to add a domain to an ignored list for the audit not to clock it
   ignore remove <domain> <rule> remove domain from ignored list
   ignore list                   show ignore list
-
+  create  config                Creates a config file
+  config restoredefaults        Restores default config settings
   list                          List stored domains (friendly names)
   search <term>                 Search domains by substring
   generate [length]             Generate a secure password (default 16)
@@ -1052,6 +1057,40 @@ rl.on("line", async (line) => {
         console.log("Vault saved.");
         break;
       }
+      case "create": {
+      if (args[1] !== "config") {
+        console.log("Usage: create config");
+        break;
+      }
+      if (sub === "restoredefaults") {
+        if (!confirmPrompt("Restore config to default settings?")) {
+          console.log("Aborted.");
+          break;
+        }
+
+        saveConfig({ ...DEFAULT_CONFIG });
+        config = loadConfig();
+
+        console.log("Configuration restored to defaults.");
+        resetAutolock();
+        break;
+      }
+
+
+      if (fs.existsSync(CONFIG_FILE)) {
+        if (!confirmPrompt("Config file already exists. Overwrite?")) {
+          console.log("Aborted.");
+          break;
+        }
+      }
+
+      saveConfig({ ...DEFAULT_CONFIG });
+      config = loadConfig();
+
+      console.log("Config file created with default settings.");
+      break;
+    }
+
       case "delete-vault": {
         if (!fs.existsSync(VAULT_FILE)) {
             console.log("No vault.json found.");
