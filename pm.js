@@ -97,7 +97,7 @@ async function scheduleClipboardClear(originalValue, delayMs) {
 const VAULT_FILE = "vault.json";
 // const AUTOLOCK_MS = 1 * 60 * 1000; // 1 minute inactivity - auto-lock
 let config = loadConfig()
-const WARNING_BEFORE_MS = 20 * 1000; // 20 seconds -  warning
+const WARNING_BEFORE_MS = 30 * 1000; // 20 seconds -  warning
 
 let kc = null;
 let autolockTimer = null;
@@ -156,7 +156,7 @@ const warnDelay = Math.max(
 warningTimer = setTimeout(() => {
   if (!kc) return;
   warned = true;
-  console.log("\n 20 seconds until auto-lock…");
+  console.log(chalk.red.italic("\nAutolock nears…"));
   rl.prompt();
 }, warnDelay);
 
@@ -164,6 +164,7 @@ autolockTimer = setTimeout(() => {
   if (!kc) return;
   kc = null;
   warned = false;
+  clearTerminal();
   console.log(chalk.red.bold("\nSession timed out. Vault locked."));
   rl.prompt();
 }, config.autolockMs);
