@@ -4,7 +4,7 @@
  * CLI for Password Manager
  *
  * Requirements:
- *   npm install prompt-sync
+ *   npm install prompt-sync clipboardy mocha chalk crypto bcrypt
  *   npm install clipboardy
  * 
  * and ofcourse, Node.js 
